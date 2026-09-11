@@ -42,7 +42,6 @@ ACCEPTED_VARIANTS = [
     "pekle", "pikl", "becle", "piclo", "pizzel"
 ]
 
-# Alucinações frequentes do Whisper em momentos de ruído/silêncio
 WHISPER_SILENCE_HALLUCINATIONS = {
     "obrigado", "obrigada", "obrigado.", "obrigada.",
     "subscreva", "inscreva-se", "deixe o seu like",
@@ -50,7 +49,6 @@ WHISPER_SILENCE_HALLUCINATIONS = {
     "obrigado pela vossa atenção", "já está", "tchau"
 }
 
-# [ALTERAÇÃO] Dicionário de correções fonéticas específicas para o Whisper em PT-PT
 COMMON_PHRASE_CORRECTIONS = {
     r'\bponto\s+chumas\b': 'como te chamas',
     r'\bvamos\s+juntos\s*,\s*chamas\b': 'como te chamas',
@@ -67,10 +65,12 @@ def fix_stt_phonetics(text: str) -> str:
         corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
     return corrected
 
+# [ALTERAÇÃO] VAD ajustado para ser permissivo com sinais fracos do ESP32
 def contains_speech_vad(audio_bytes: bytes) -> bool:
     try:
         import webrtcvad
-        vad = webrtcvad.Vad(3)
+        # Mudado de 3 (muito rigoroso) para 1 (permissivo para mics de longe/baixo volume)
+        vad = webrtcvad.Vad(1)
         sample_rate = 16000
         frame_duration = 30
         frame_size = int(sample_rate * (frame_duration / 1000.0) * 2)
@@ -87,39 +87,29 @@ def contains_speech_vad(audio_bytes: bytes) -> bool:
 
         if total_frames == 0:
             return True
-        return (speech_frames / total_frames) > 0.15
+        # Reduzido de 0.15 (15%) para 0.05 (5%) para aceitar frases mais suaves
+        return (speech_frames / total_frames) > 0.05
     except Exception:
         return True
 
-# ==========================================
-# Gestão de Ficheiros e Memória
-# ==========================================
 MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickle_memory.json")
 REMINDERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickle_reminders.json")
 
 def load_reminders():
-    if not os.path.exists(REMINDERS_FILE):
-        return []
+    if not os.path.exists(REMINDERS_FILE): return []
     try:
-        with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"[Lembretes] Erro ao carregar: {e}")
-        return []
+        with open(REMINDERS_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    except Exception: return []
 
 def save_reminders(reminders_list):
     with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
         json.dump(reminders_list, f, ensure_ascii=False, indent=2)
 
 def load_memory() -> list:
-    if not os.path.exists(MEMORY_FILE):
-        return []
+    if not os.path.exists(MEMORY_FILE): return []
     try:
-        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"[Memória] Erro ao carregar: {e}")
-        return []
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    except Exception: return []
 
 def save_memory(facts: list):
     with open(MEMORY_FILE, "w", encoding="utf-8") as f:
@@ -128,41 +118,22 @@ def save_memory(facts: list):
 reminders = load_reminders()
 memory_facts = load_memory()
 
-print(f"[Lembretes] {len(reminders)} lembrete(s) carregado(s)")
-print(f"[Memória] {len(memory_facts)} facto(s) carregado(s)")
-
-# ==========================================
-# Funções Auxiliares de Tratamento de Texto
-# ==========================================
 def clean_portuguese_text(text: str) -> str:
-    if re.search(r'[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f\u4e00-\u9faf]', text):
-        return ""
-    cleaned = re.sub(r'[^a-zA-Z0-9áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇ\s\.,!\?\'-]', '', text)
-    return cleaned.strip()
+    if re.search(r'[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f\u4e00-\u9faf]', text): return ""
+    return re.sub(r'[^a-zA-Z0-9áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇ\s\.,!\?\'-]', '', text).strip()
 
 def is_hallucination(text: str) -> bool:
-    """Deteta repetições consecutivas de palavras e frases curtas geradas por ruído."""
     words = text.lower().split()
-    if not words:
-        return False
-
+    if not words: return False
     current_repeat = 1
     for i in range(1, len(words)):
         if words[i] == words[i - 1]:
             current_repeat += 1
-            if current_repeat >= 3:
-                return True
-        else:
-            current_repeat = 1
-
-    if len(words) >= 3 and len(set(words)) == 1:
-        return True
-
+            if current_repeat >= 3: return True
+        else: current_repeat = 1
+    if len(words) >= 3 and len(set(words)) == 1: return True
     clean_text = " ".join(words)
-    if re.search(r'(\b\w+\s+\w+\b)(?:\s+\1){2,}', clean_text):
-        return True
-
-    return False
+    return bool(re.search(r'(\b\w+\s+\w+\b)(?:\s+\1){2,}', clean_text))
 
 def map_to_pickle(text: str) -> str:
     words = text.split()
@@ -177,10 +148,6 @@ def map_to_pickle(text: str) -> str:
             return "Pickle " + " ".join(remainder)
     return text
 
-# ==========================================
-# Endpoints da API
-# ==========================================
-
 @app.post("/stt", dependencies=[Depends(verify_secret)])
 async def stt(request: Request):
     audio_bytes = await request.body()
@@ -190,7 +157,6 @@ async def stt(request: Request):
         return {"text": ""}
 
     try:
-        # [ALTERAÇÃO] Prompt expandido com expressões de reação e exclamações comuns
         transcription = groq_client.audio.transcriptions.create(
             file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
             model=GROQ_STT_MODEL,
@@ -215,16 +181,12 @@ async def stt(request: Request):
     
     portuguese_text = clean_portuguese_text(raw_text)
     if not portuguese_text:
-        print(f"[STT Ignorado]: Ruído ou caracteres inválidos ('{raw_text}')")
         return {"text": ""}
 
-    # [ALTERAÇÃO] Aplicação do filtro de correção fonética antes do envio
     fixed_text = fix_stt_phonetics(portuguese_text)
-
     normalized_text = map_to_pickle(fixed_text)
     print(f"[PT-Bruto]: '{raw_text}' -> [Corrigido]: '{fixed_text}' -> [Normalizado]: '{normalized_text}'")
     return {"text": normalized_text}
-
 
 class TtsRequest(BaseModel):
     text: str
@@ -251,16 +213,12 @@ async def tts(req: TtsRequest):
             wav_data = f.read()
 
         return Response(content=wav_data, media_type="audio/wav")
-
     except Exception as e:
         print(f"[Edge-TTS ERRO]: {e}")
         return Response(content=b"", media_type="audio/wav", status_code=500)
     finally:
-        if os.path.exists(tmp_mp3):
-            os.remove(tmp_mp3)
-        if os.path.exists(tmp_wav):
-            os.remove(tmp_wav)
-
+        if os.path.exists(tmp_mp3): os.remove(tmp_mp3)
+        if os.path.exists(tmp_wav): os.remove(tmp_wav)
 
 @app.post("/chat", dependencies=[Depends(verify_secret)])
 async def chat(request: Request):
@@ -272,7 +230,6 @@ async def chat(request: Request):
             last_user_message = msg.get("content", "").strip()
             break
 
-    print(f"[Chat] Última mensagem do utilizador: '{last_user_message}'")
     lower_msg = last_user_message.lower()
 
     remember_match = re.match(r'^lembra[\s\-,]*te[\s,]*(?:que\s+)?', lower_msg)
@@ -281,13 +238,11 @@ async def chat(request: Request):
         if new_fact:
             memory_facts.append(new_fact)
             save_memory(memory_facts)
-            print(f"[Memória] Novo facto guardado: '{new_fact}'")
             return {"message": {"content": f"Ok, vou lembrar-me disso: {new_fact}."}}
 
     if re.match(r'^esquece\s+tudo', lower_msg):
         memory_facts.clear()
         save_memory(memory_facts)
-        print("[Memória] Memória apagada por pedido do utilizador")
         return {"message": {"content": "Pronto, esqueci tudo o que sabia sobre ti."}}
 
     requested_model = body.get("model", GEMINI_MODEL)
@@ -303,7 +258,6 @@ async def chat(request: Request):
         target_time = f"{hour:02d}:{minute:02d}"
         reminders.append({"task": task, "time": target_time, "delivered": False})
         save_reminders(reminders)
-        print(f"[Lembretes] Novo lembrete: '{task}' às {target_time}")
         return {"message": {"content": f"Combinado, às {target_time} lembro-te: {task}."}}
 
     system_instruction = None
@@ -324,19 +278,12 @@ async def chat(request: Request):
         time_context = (
             f"\n\nContexto actual: agora são {now.strftime('%H:%M')} "
             f"do dia {now.strftime('%d/%m/%Y')}, em Lisboa, Portugal. "
-            "Se te perguntarem as horas, a data, ou o dia da semana, responde sempre com este valor real -- "
-            "nunca digas que não sabes nem inventes uma desculpa."
+            "Se te perguntarem as horas, a data, ou o dia da semana, responde sempre com este valor real."
         )
-    except Exception as e:
-        print(f"[Aviso] Falha ao obter hora de Lisboa: {e}")
+    except Exception:
         time_context = ""
 
-    if memory_facts:
-        memory_context = "\n\nCoisas que já sabes sobre a pessoa com quem estás a falar (usa isto naturally, sem as recitar todas de uma vez nem as mencionar explicitamente que estás a 'consultar'):\n"
-        memory_context += "\n".join(f"- {fact}" for fact in memory_facts)
-    else:
-        memory_context = ""
-
+    memory_context = "\n\nCoisas que já sabes sobre a pessoa:\n" + "\n".join(f"- {fact}" for fact in memory_facts) if memory_facts else ""
     full_system_instruction = (system_instruction or "") + time_context + memory_context
 
     try:
@@ -346,9 +293,7 @@ async def chat(request: Request):
             config=types.GenerateContentConfig(
                 system_instruction=full_system_instruction,
                 max_output_tokens=800,
-                thinking_config=types.ThinkingConfig(
-                    thinking_level=types.ThinkingLevel.LOW,
-                ),
+                thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
             ),
         )
         reply_text = (response.text or "").strip()
@@ -358,12 +303,9 @@ async def chat(request: Request):
 
     return {"message": {"content": reply_text}}
 
-
 @app.get("/reminders/due", dependencies=[Depends(verify_secret)])
 async def reminders_due(time: str):
     due = [r for r in reminders if not r["delivered"] and r["time"] == time]
-    for r in due:
-        r["delivered"] = True
-    if due:
-        save_reminders(reminders)
+    for r in due: r["delivered"] = True
+    if due: save_reminders(reminders)
     return {"reminders": [r["task"] for r in due]}
