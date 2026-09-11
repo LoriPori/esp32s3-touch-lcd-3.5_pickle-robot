@@ -57,7 +57,8 @@ COMMON_PHRASE_CORRECTIONS = {
     r'\bchumas\b': 'chamas',
     r'\bcom\s+te\s+chamas\b': 'como te chamas',
     r'\bquem\s+es\s+tu\b': 'quem és tu',
-    r'\bque\s+e\s+isso\b': 'o que é isso'
+    r'\bque\s+e\s+isso\b': 'o que é isso',
+    r'\bessa\s+viol[êe]ncia\b': 'isso é violência'
 }
 
 def fix_stt_phonetics(text: str) -> str:
@@ -189,11 +190,11 @@ async def stt(request: Request):
         return {"text": ""}
 
     try:
-        # [ALTERAÇÃO] Prompt expandido com frases chave comuns para guiar o Whisper
+        # [ALTERAÇÃO] Prompt expandido com expressões de reação e exclamações comuns
         transcription = groq_client.audio.transcriptions.create(
             file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
             model=GROQ_STT_MODEL,
-            prompt="Transcrição em português de Portugal para o robô Pickle. Perguntas comuns: Como te chamas?, Olá Pickle, Quem és tu?, Que horas são?, O que podes fazer?.",
+            prompt="Transcrição em português de Portugal para o robô Pickle. Perguntas e exclamações comuns: Como te chamas?, Olá Pickle, Quem és tu?, Isso é violência!, Que horas são?, O que podes fazer?.",
             response_format="json",
             language="pt",
             temperature=0.0
@@ -331,7 +332,7 @@ async def chat(request: Request):
         time_context = ""
 
     if memory_facts:
-        memory_context = "\n\nCoisas que já sabes sobre a pessoa com quem estás a falar (usa isto naturalmente, sem as recitar todas de uma vez nem as mencionar explicitamente que estás a 'consultar'):\n"
+        memory_context = "\n\nCoisas que já sabes sobre a pessoa com quem estás a falar (usa isto naturally, sem as recitar todas de uma vez nem as mencionar explicitamente que estás a 'consultar'):\n"
         memory_context += "\n".join(f"- {fact}" for fact in memory_facts)
     else:
         memory_context = ""
