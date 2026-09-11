@@ -1,7 +1,7 @@
 import os
 import re
 import io
-import wave
+import json
 import uuid
 import tempfile
 import subprocess
@@ -9,19 +9,14 @@ from difflib import SequenceMatcher
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi import FastAPI, Request, Response, Header, HTTPException, Depends
 from pydantic import BaseModel
-from fastapi import FastAPI, Request, Header, HTTPException, Depends
 
 from groq import Groq
 from google import genai
 from google.genai import types
 
-# Importa o Edge-TTS
 import edge_tts
-
-import json
 
 app = FastAPI()
 
@@ -30,7 +25,6 @@ app = FastAPI()
 # ==========================================
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-
 PICKLE_SHARED_SECRET = os.environ.get("PICKLE_SHARED_SECRET", "")
 
 def verify_secret(x_pickle_secret: str = Header(default="")):
@@ -48,8 +42,18 @@ ACCEPTED_VARIANTS = [
     "pekle", "pikl", "becle", "piclo", "pizzel"
 ]
 
-MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickle_memory.json")
+# Alucinações frequentes do Whisper em momentos de ruído/silêncio
+WHISPER_SILENCE_HALLUCINATIONS = {
+    "obrigado", "obrigada", "obrigado.", "obrigada.",
+    "subscreva", "inscreva-se", "deixe o seu like",
+    "amém", "amém.", "obrigado por assistir", "legendas:",
+    "obrigado pela vossa atenção", "já está", "tchau"
+}
 
+# ==========================================
+# Gestão de Ficheiros e Memória
+# ==========================================
+MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickle_memory.json")
 REMINDERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickle_reminders.json")
 
 def load_reminders():
@@ -62,12 +66,9 @@ def load_reminders():
         print(f"[Lembretes] Erro ao carregar: {e}")
         return []
 
-def save_reminders(reminders):
+def save_reminders(reminders_list):
     with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(reminders, f, ensure_ascii=False, indent=2)
-
-reminders = load_reminders()
-print(f"[Lembretes] {len(reminders)} lembrete(s) carregado(s)")
+        json.dump(reminders_list, f, ensure_ascii=False, indent=2)
 
 def load_memory() -> list:
     if not os.path.exists(MEMORY_FILE):
@@ -83,11 +84,14 @@ def save_memory(facts: list):
     with open(MEMORY_FILE, "w", encoding="utf-8") as f:
         json.dump(facts, f, ensure_ascii=False, indent=2)
 
+reminders = load_reminders()
 memory_facts = load_memory()
-print(f"[Memória] Ficheiro usado: {MEMORY_FILE}")
+
+print(f"[Lembretes] {len(reminders)} lembrete(s) carregado(s)")
 print(f"[Memória] {len(memory_facts)} facto(s) carregado(s)")
+
 # ==========================================
-# Funções Auxiliares
+# Funções Auxiliares de Tratamento de Texto
 # ==========================================
 def clean_portuguese_text(text: str) -> str:
     if re.search(r'[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f\u4e00-\u9faf]', text):
@@ -96,18 +100,31 @@ def clean_portuguese_text(text: str) -> str:
     return cleaned.strip()
 
 def is_hallucination(text: str) -> bool:
+    """Deteta repetições consecutivas de palavras e frases curtas geradas por ruído."""
     words = text.lower().split()
-    if len(words) < 6:
+    if not words:
         return False
-    max_repeat = 1
+
+    # 1. Deteta palavras únicas repetidas 3 ou mais vezes seguidas (ex: "pico pico pico", "oque oque oque")
     current_repeat = 1
     for i in range(1, len(words)):
         if words[i] == words[i - 1]:
             current_repeat += 1
-            max_repeat = max(max_repeat, current_repeat)
+            if current_repeat >= 3:
+                return True
         else:
             current_repeat = 1
-    return max_repeat >= 5
+
+    # 2. Deteta diversidade de vocabulário anormalmente baixa em frases curtas
+    if len(words) >= 3 and len(set(words)) == 1:
+        return True
+
+    # 3. Deteta repetição de padrões de 2 ou mais palavras (ex: "o que o que o que")
+    clean_text = " ".join(words)
+    if re.search(r'(\b\w+\s+\w+\b)(?:\s+\1){2,}', clean_text):
+        return True
+
+    return False
 
 def map_to_pickle(text: str) -> str:
     words = text.split()
@@ -122,7 +139,6 @@ def map_to_pickle(text: str) -> str:
             return "Pickle " + " ".join(remainder)
     return text
 
-
 # ==========================================
 # Endpoints da API
 # ==========================================
@@ -132,11 +148,11 @@ async def stt(request: Request):
     audio_bytes = await request.body()
     
     try:
-        # CORREÇÃO: Envolver os bytes num io.BytesIO() para o SDK da Groq tratar como ficheiro
+        # Prompt natural para evitar enviesamento e loops de repetição
         transcription = groq_client.audio.transcriptions.create(
             file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
             model=GROQ_STT_MODEL,
-            prompt="Pickle, picle, pico, pica.",
+            prompt="Transcrição de comandos de voz em português para o assistente Pickle.",
             response_format="json",
             language="pt",
             temperature=0.0
@@ -146,13 +162,20 @@ async def stt(request: Request):
         print(f"[Groq STT ERRO]: {e}")
         return {"text": ""}
 
+    # Filtro de frases habitualmente alucinadas em silêncio
+    normalized_check = raw_text.lower().strip(' .!?,\n\t')
+    if not normalized_check or normalized_check in WHISPER_SILENCE_HALLUCINATIONS:
+        print(f"[STT Ignorado]: Ruído interpretado como silêncio/alucinação ('{raw_text}')")
+        return {"text": ""}
+
+    # Filtro de repetição contínua
     if is_hallucination(raw_text):
-        print(f"[STT Ignorado]: Alucinação por repetição detetada ('{raw_text[:60]}...')")
+        print(f"[STT Ignorado]: Alucinação por repetição detetada ('{raw_text}')")
         return {"text": ""}
     
     portuguese_text = clean_portuguese_text(raw_text)
     if not portuguese_text:
-        print(f"[STT Ignorado]: Ruído ou alucinação detetada ('{raw_text}')")
+        print(f"[STT Ignorado]: Ruído ou caracteres inválidos ('{raw_text}')")
         return {"text": ""}
 
     normalized_text = map_to_pickle(portuguese_text)
@@ -173,12 +196,9 @@ async def tts(req: TtsRequest):
     tmp_wav = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.wav")
 
     try:
-        # Opções de voz PT-PT: "pt-PT-DuarteNeural" (masculino) ou "pt-PT-RaquelNeural" (feminino)
-        # Ajustei a velocidade ligeiramente com rate="+5%"
         communicate = edge_tts.Communicate(clean_text, "pt-PT-DuarteNeural", rate="+5%")
         await communicate.save(tmp_mp3)
 
-        # Converte MP3 do Edge-TTS para WAV 16k 16-bit Mono exigido pelo Pickle
         subprocess.run([
             "ffmpeg", "-y", "-i", tmp_mp3, 
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", tmp_wav
@@ -193,9 +213,10 @@ async def tts(req: TtsRequest):
         print(f"[Edge-TTS ERRO]: {e}")
         return Response(content=b"", media_type="audio/wav", status_code=500)
     finally:
-        # Limpar os ficheiros temporários para não entupir o PC
-        if os.path.exists(tmp_mp3): os.remove(tmp_mp3)
-        if os.path.exists(tmp_wav): os.remove(tmp_wav)
+        if os.path.exists(tmp_mp3):
+            os.remove(tmp_mp3)
+        if os.path.exists(tmp_wav):
+            os.remove(tmp_wav)
 
 
 @app.post("/chat", dependencies=[Depends(verify_secret)])
@@ -212,7 +233,6 @@ async def chat(request: Request):
     lower_msg = last_user_message.lower()
 
     remember_match = re.match(r'^lembra[\s\-,]*te[\s,]*(?:que\s+)?', lower_msg)
-    print(f"[Chat] Comando 'lembra-te que' detectado? {remember_match is not None}")
     if remember_match:
         new_fact = last_user_message[remember_match.end():].strip(" ,.")
         if new_fact:
@@ -226,6 +246,7 @@ async def chat(request: Request):
         save_memory(memory_facts)
         print("[Memória] Memória apagada por pedido do utilizador")
         return {"message": {"content": "Pronto, esqueci tudo o que sabia sobre ti."}}
+
     requested_model = body.get("model", GEMINI_MODEL)
 
     reminder_match = re.match(
@@ -293,6 +314,7 @@ async def chat(request: Request):
         reply_text = "Desculpa, tive um problema a ligar ao Gemini."
 
     return {"message": {"content": reply_text}}
+
 
 @app.get("/reminders/due", dependencies=[Depends(verify_secret)])
 async def reminders_due(time: str):
