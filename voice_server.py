@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
+from fastapi import FastAPI, Request, Header, HTTPException, Depends
 
 from groq import Groq
 from google import genai
@@ -29,6 +30,12 @@ app = FastAPI()
 # ==========================================
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+
+PICKLE_SHARED_SECRET = os.environ.get("PICKLE_SHARED_SECRET", "")
+
+def verify_secret(x_pickle_secret: str = Header(default="")):
+    if not PICKLE_SHARED_SECRET or x_pickle_secret != PICKLE_SHARED_SECRET:
+        raise HTTPException(status_code=401, detail="Não autorizado")
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -120,7 +127,7 @@ def map_to_pickle(text: str) -> str:
 # Endpoints da API
 # ==========================================
 
-@app.post("/stt")
+@app.post("/stt", dependencies=[Depends(verify_secret)])
 async def stt(request: Request):
     audio_bytes = await request.body()
     
@@ -156,7 +163,7 @@ async def stt(request: Request):
 class TtsRequest(BaseModel):
     text: str
 
-@app.post("/tts")
+@app.post("/tts", dependencies=[Depends(verify_secret)])
 async def tts(req: TtsRequest):
     clean_text = clean_portuguese_text(req.text)
     if not clean_text:
@@ -191,7 +198,7 @@ async def tts(req: TtsRequest):
         if os.path.exists(tmp_wav): os.remove(tmp_wav)
 
 
-@app.post("/chat")
+@app.post("/chat", dependencies=[Depends(verify_secret)])
 async def chat(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
@@ -287,7 +294,7 @@ async def chat(request: Request):
 
     return {"message": {"content": reply_text}}
 
-@app.get("/reminders/due")
+@app.get("/reminders/due", dependencies=[Depends(verify_secret)])
 async def reminders_due(time: str):
     due = [r for r in reminders if not r["delivered"] and r["time"] == time]
     for r in due:
