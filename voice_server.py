@@ -50,7 +50,22 @@ WHISPER_SILENCE_HALLUCINATIONS = {
     "obrigado pela vossa atenção", "já está", "tchau"
 }
 
-# [ALTERAÇÃO] Validação básica VAD (Voice Activity Detection) para descartar buffers vazios
+# [ALTERAÇÃO] Dicionário de correções fonéticas específicas para o Whisper em PT-PT
+COMMON_PHRASE_CORRECTIONS = {
+    r'\bponto\s+chumas\b': 'como te chamas',
+    r'\bvamos\s+juntos\s*,\s*chamas\b': 'como te chamas',
+    r'\bchumas\b': 'chamas',
+    r'\bcom\s+te\s+chamas\b': 'como te chamas',
+    r'\bquem\s+es\s+tu\b': 'quem és tu',
+    r'\bque\s+e\s+isso\b': 'o que é isso'
+}
+
+def fix_stt_phonetics(text: str) -> str:
+    corrected = text
+    for pattern, replacement in COMMON_PHRASE_CORRECTIONS.items():
+        corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
+    return corrected
+
 def contains_speech_vad(audio_bytes: bytes) -> bool:
     try:
         import webrtcvad
@@ -73,7 +88,6 @@ def contains_speech_vad(audio_bytes: bytes) -> bool:
             return True
         return (speech_frames / total_frames) > 0.15
     except Exception:
-        # Se a biblioteca webrtcvad não estiver instalada, não bloqueia a execução
         return True
 
 # ==========================================
@@ -131,7 +145,6 @@ def is_hallucination(text: str) -> bool:
     if not words:
         return False
 
-    # 1. Deteta palavras únicas repetidas 3 ou mais vezes seguidas (ex: "pico pico pico", "oque oque oque")
     current_repeat = 1
     for i in range(1, len(words)):
         if words[i] == words[i - 1]:
@@ -141,11 +154,9 @@ def is_hallucination(text: str) -> bool:
         else:
             current_repeat = 1
 
-    # 2. Deteta diversidade de vocabulário anormalmente baixa em frases curtas
     if len(words) >= 3 and len(set(words)) == 1:
         return True
 
-    # 3. Deteta repetição de padrões de 2 ou mais palavras (ex: "o que o que o que")
     clean_text = " ".join(words)
     if re.search(r'(\b\w+\s+\w+\b)(?:\s+\1){2,}', clean_text):
         return True
@@ -173,17 +184,16 @@ def map_to_pickle(text: str) -> str:
 async def stt(request: Request):
     audio_bytes = await request.body()
     
-    # [ALTERAÇÃO] Verificação prévia de voz via VAD
     if not contains_speech_vad(audio_bytes):
         print("[STT Ignorado]: Ruído de fundo sem presença de voz")
         return {"text": ""}
 
     try:
-        # Prompt natural para evitar enviesamento e loops de repetição
+        # [ALTERAÇÃO] Prompt expandido com frases chave comuns para guiar o Whisper
         transcription = groq_client.audio.transcriptions.create(
             file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
             model=GROQ_STT_MODEL,
-            prompt="Transcrição de comandos de voz em português para o assistente Pickle.",
+            prompt="Transcrição em português de Portugal para o robô Pickle. Perguntas comuns: Como te chamas?, Olá Pickle, Quem és tu?, Que horas são?, O que podes fazer?.",
             response_format="json",
             language="pt",
             temperature=0.0
@@ -193,13 +203,11 @@ async def stt(request: Request):
         print(f"[Groq STT ERRO]: {e}")
         return {"text": ""}
 
-    # Filtro de frases habitualmente alucinadas em silêncio
     normalized_check = raw_text.lower().strip(' .!?,\n\t')
     if not normalized_check or normalized_check in WHISPER_SILENCE_HALLUCINATIONS:
         print(f"[STT Ignorado]: Ruído interpretado como silêncio/alucinação ('{raw_text}')")
         return {"text": ""}
 
-    # Filtro de repetição contínua
     if is_hallucination(raw_text):
         print(f"[STT Ignorado]: Alucinação por repetição detetada ('{raw_text}')")
         return {"text": ""}
@@ -209,8 +217,11 @@ async def stt(request: Request):
         print(f"[STT Ignorado]: Ruído ou caracteres inválidos ('{raw_text}')")
         return {"text": ""}
 
-    normalized_text = map_to_pickle(portuguese_text)
-    print(f"[PT-Bruto]: '{raw_text}' -> [Normalizado]: '{normalized_text}'")
+    # [ALTERAÇÃO] Aplicação do filtro de correção fonética antes do envio
+    fixed_text = fix_stt_phonetics(portuguese_text)
+
+    normalized_text = map_to_pickle(fixed_text)
+    print(f"[PT-Bruto]: '{raw_text}' -> [Corrigido]: '{fixed_text}' -> [Normalizado]: '{normalized_text}'")
     return {"text": normalized_text}
 
 
@@ -320,7 +331,7 @@ async def chat(request: Request):
         time_context = ""
 
     if memory_facts:
-        memory_context = "\n\nCoisas que já sabes sobre a pessoa com quem estás a falar (usa isto naturally, sem as recitar todas de uma vez nem as mencionar explicitamente que estás a 'consultar'):\n"
+        memory_context = "\n\nCoisas que já sabes sobre a pessoa com quem estás a falar (usa isto naturalmente, sem as recitar todas de uma vez nem as mencionar explicitamente que estás a 'consultar'):\n"
         memory_context += "\n".join(f"- {fact}" for fact in memory_facts)
     else:
         memory_context = ""
