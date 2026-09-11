@@ -50,6 +50,32 @@ WHISPER_SILENCE_HALLUCINATIONS = {
     "obrigado pela vossa atenção", "já está", "tchau"
 }
 
+# [ALTERAÇÃO] Validação básica VAD (Voice Activity Detection) para descartar buffers vazios
+def contains_speech_vad(audio_bytes: bytes) -> bool:
+    try:
+        import webrtcvad
+        vad = webrtcvad.Vad(3)
+        sample_rate = 16000
+        frame_duration = 30
+        frame_size = int(sample_rate * (frame_duration / 1000.0) * 2)
+
+        speech_frames = 0
+        total_frames = 0
+
+        for i in range(0, len(audio_bytes) - frame_size, frame_size):
+            frame = audio_bytes[i:i + frame_size]
+            if len(frame) == frame_size:
+                total_frames += 1
+                if vad.is_speech(frame, sample_rate):
+                    speech_frames += 1
+
+        if total_frames == 0:
+            return True
+        return (speech_frames / total_frames) > 0.15
+    except Exception:
+        # Se a biblioteca webrtcvad não estiver instalada, não bloqueia a execução
+        return True
+
 # ==========================================
 # Gestão de Ficheiros e Memória
 # ==========================================
@@ -147,6 +173,11 @@ def map_to_pickle(text: str) -> str:
 async def stt(request: Request):
     audio_bytes = await request.body()
     
+    # [ALTERAÇÃO] Verificação prévia de voz via VAD
+    if not contains_speech_vad(audio_bytes):
+        print("[STT Ignorado]: Ruído de fundo sem presença de voz")
+        return {"text": ""}
+
     try:
         # Prompt natural para evitar enviesamento e loops de repetição
         transcription = groq_client.audio.transcriptions.create(
@@ -289,7 +320,7 @@ async def chat(request: Request):
         time_context = ""
 
     if memory_facts:
-        memory_context = "\n\nCoisas que já sabes sobre a pessoa com quem estás a falar (usa isto naturalmente, sem as recitar todas de uma vez nem as mencionar explicitamente que estás a 'consultar'):\n"
+        memory_context = "\n\nCoisas que já sabes sobre a pessoa com quem estás a falar (usa isto naturally, sem as recitar todas de uma vez nem as mencionar explicitamente que estás a 'consultar'):\n"
         memory_context += "\n".join(f"- {fact}" for fact in memory_facts)
     else:
         memory_context = ""
