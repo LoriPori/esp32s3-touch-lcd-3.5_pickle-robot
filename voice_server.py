@@ -34,8 +34,6 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 PICKLE_SHARED_SECRET = os.environ.get("PICKLE_SHARED_SECRET", "")
 
 def verify_secret(x_pickle_secret: str = Header(default="")):
-    print(f"[Auth] Recebido: '{x_pickle_secret}' (len={len(x_pickle_secret)})")
-    print(f"[Auth] Esperado: '{PICKLE_SHARED_SECRET}' (len={len(PICKLE_SHARED_SECRET)})")
     if not PICKLE_SHARED_SECRET or x_pickle_secret != PICKLE_SHARED_SECRET:
         raise HTTPException(status_code=401, detail="Não autorizado")
 
