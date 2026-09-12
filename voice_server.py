@@ -47,7 +47,7 @@ WHISPER_SILENCE_HALLUCINATIONS = {
     "subscreva", "inscreva-se", "deixe o seu like",
     "amém", "amém.", "obrigado por assistir", "legendas:",
     "obrigado pela vossa atenção", "já está", "tchau",
-    "o que podes fazer"
+    "o que podes fazer", "queso"
 }
 
 COMMON_PHRASE_CORRECTIONS = {
