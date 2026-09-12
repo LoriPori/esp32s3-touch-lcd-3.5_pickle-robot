@@ -70,7 +70,7 @@ def contains_speech_vad(audio_bytes: bytes) -> bool:
     try:
         import webrtcvad
         # Mudado de 3 (muito rigoroso) para 1 (permissivo para mics de longe/baixo volume)
-        vad = webrtcvad.Vad(1)
+        vad = webrtcvad.Vad(2)
         sample_rate = 16000
         frame_duration = 30
         frame_size = int(sample_rate * (frame_duration / 1000.0) * 2)
@@ -88,7 +88,7 @@ def contains_speech_vad(audio_bytes: bytes) -> bool:
         if total_frames == 0:
             return True
         # Reduzido de 0.15 (15%) para 0.05 (5%) para aceitar frases mais suaves
-        return (speech_frames / total_frames) > 0.05
+        return (speech_frames / total_frames) > 0.10
     except Exception:
         return True
 
