@@ -135,6 +135,46 @@ def is_hallucination(text: str) -> bool:
     clean_text = " ".join(words)
     return bool(re.search(r'(\b\w+\s+\w+\b)(?:\s+\1){2,}', clean_text))
 
+NO_SPEECH_PROB_THRESHOLD = 0.6
+AVG_LOGPROB_REJECT_THRESHOLD = -1.0
+AVG_LOGPROB_SOFT_THRESHOLD = -0.5
+COMPRESSION_RATIO_THRESHOLD = 2.4
+
+def _extract_confident_text(transcription) -> str:
+    """
+    Usa os metadados por segmento (no_speech_prob, avg_logprob, compression_ratio)
+    do response_format=verbose_json para descartar segmentos que o Whisper
+    alucinou a partir de silêncio/ruído -- em vez de confiar cegamente em
+    transcription.text.
+    """
+    segments = getattr(transcription, "segments", None)
+    if not segments:
+        # Sem segmentos (fallback) -- mantém o comportamento anterior.
+        return (getattr(transcription, "text", "") or "").strip()
+
+    kept_parts = []
+    for seg in segments:
+        get = (lambda k, d=None: seg.get(k, d)) if isinstance(seg, dict) else (lambda k, d=None: getattr(seg, k, d))
+        no_speech_prob = get("no_speech_prob", 0.0)
+        avg_logprob = get("avg_logprob", 0.0)
+        compression_ratio = get("compression_ratio", 1.0)
+        text = get("text", "")
+
+        if avg_logprob is not None and avg_logprob < AVG_LOGPROB_REJECT_THRESHOLD:
+            print(f"[STT] Segmento rejeitado (avg_logprob={avg_logprob:.2f}): '{text}'")
+            continue
+        if (no_speech_prob is not None and no_speech_prob > NO_SPEECH_PROB_THRESHOLD
+                and avg_logprob is not None and avg_logprob < AVG_LOGPROB_SOFT_THRESHOLD):
+            print(f"[STT] Segmento rejeitado (no_speech_prob={no_speech_prob:.2f}, avg_logprob={avg_logprob:.2f}): '{text}'")
+            continue
+        if compression_ratio is not None and compression_ratio > COMPRESSION_RATIO_THRESHOLD:
+            print(f"[STT] Segmento rejeitado (compression_ratio={compression_ratio:.2f}): '{text}'")
+            continue
+
+        kept_parts.append(text)
+
+    return " ".join(p.strip() for p in kept_parts if p and p.strip())
+
 def map_to_pickle(text: str) -> str:
     words = text.split()
     for i, word in enumerate(words):
@@ -161,13 +201,17 @@ async def stt(request: Request):
             file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
             model=GROQ_STT_MODEL,
             prompt="Transcrição em português de Portugal para o robô Pickle. Perguntas e exclamações comuns: Como te chamas?, Olá Pickle, Quem és tu?, Isso é violência!, Que horas são?, O que podes fazer?.",
-            response_format="json",
+            response_format="verbose_json",
             language="pt",
             temperature=0.0
         )
-        raw_text = transcription.text.strip()
     except Exception as e:
         print(f"[Groq STT ERRO]: {e}")
+        return {"text": ""}
+
+    raw_text = _extract_confident_text(transcription)
+    if not raw_text:
+        print("[STT Ignorado]: segmentos rejeitados por baixa confiança (provável alucinação em silêncio)")
         return {"text": ""}
 
     normalized_check = raw_text.lower().strip(' .!?,\n\t')
