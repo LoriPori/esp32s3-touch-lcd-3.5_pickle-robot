@@ -3,3 +3,4 @@ uvicorn
 edge-tts
 google-genai
 groq
+requests
