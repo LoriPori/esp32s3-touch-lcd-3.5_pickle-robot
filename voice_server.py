@@ -89,14 +89,23 @@ def get_spotify_access_token():
 
 _tempo_cache = {"track_id": None, "tempo": 0.0}
 
+
+DEFAULT_TEMPO_BPM = 100.0
+
 def get_track_tempo(track_id: str, access_token: str) -> float:
     if _tempo_cache["track_id"] == track_id:
         return _tempo_cache["tempo"]
+
     resp = requests.get(
         f"https://api.spotify.com/v1/audio-features/{track_id}",
         headers={"Authorization": f"Bearer {access_token}"},
     )
-    tempo = resp.json().get("tempo", 0.0) if resp.status_code == 200 else 0.0
+    if resp.status_code == 200:
+        tempo = resp.json().get("tempo", 0.0) or DEFAULT_TEMPO_BPM
+    else:
+        print(f"[Spotify] audio-features falhou ({resp.status_code}): {resp.text[:200]}")
+        tempo = DEFAULT_TEMPO_BPM
+
     _tempo_cache["track_id"] = track_id
     _tempo_cache["tempo"] = tempo
     return tempo
