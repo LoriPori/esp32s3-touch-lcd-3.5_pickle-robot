@@ -41,6 +41,66 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 GROQ_STT_MODEL = "whisper-large-v3-turbo"
 
+# ==========================================
+# Configuração Spotify
+# ==========================================
+SPOTIFY_CLIENT_ID     = os.environ["CLIENT_ID_SPOTIFY"]
+SPOTIFY_CLIENT_SECRET = os.environ["CLIENT_SECRET_SPOTIFY"]
+SPOTIFY_REDIRECT_URI  = "https://esp32s3-touch-lcd-3-5-pickle-robot.onrender.com/callback"
+SPOTIFY_SCOPES        = "user-read-currently-playing user-read-playback-state user-modify-playback-state"
+
+SPOTIFY_TOKENS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spotify_tokens.json")
+
+def load_spotify_tokens() -> dict:
+    if not os.path.exists(SPOTIFY_TOKENS_FILE): return {}
+    try:
+        with open(SPOTIFY_TOKENS_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    except Exception: return {}
+
+def save_spotify_tokens(tokens: dict):
+    with open(SPOTIFY_TOKENS_FILE, "w", encoding="utf-8") as f:
+        json.dump(tokens, f, ensure_ascii=False, indent=2)
+
+spotify_tokens = load_spotify_tokens()
+
+def get_spotify_access_token():
+    if not spotify_tokens.get("refresh_token"):
+        return None
+    if spotify_tokens.get("access_token") and time.time() < spotify_tokens.get("expires_at", 0):
+        return spotify_tokens["access_token"]
+
+    auth_header = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
+    resp = requests.post(
+        "https://accounts.spotify.com/api/token",
+        headers={"Authorization": f"Basic {auth_header}", "Content-Type": "application/x-www-form-urlencoded"},
+        data={"grant_type": "refresh_token", "refresh_token": spotify_tokens["refresh_token"]},
+    )
+    if resp.status_code != 200:
+        print(f"[Spotify] Erro ao renovar token: {resp.text}")
+        return None
+
+    data = resp.json()
+    spotify_tokens["access_token"] = data["access_token"]
+    spotify_tokens["expires_at"]   = time.time() + data["expires_in"] - 30
+    if "refresh_token" in data:
+        spotify_tokens["refresh_token"] = data["refresh_token"]
+    save_spotify_tokens(spotify_tokens)
+    return spotify_tokens["access_token"]
+
+_tempo_cache = {"track_id": None, "tempo": 0.0}
+
+def get_track_tempo(track_id: str, access_token: str) -> float:
+    if _tempo_cache["track_id"] == track_id:
+        return _tempo_cache["tempo"]
+    resp = requests.get(
+        f"https://api.spotify.com/v1/audio-features/{track_id}",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    tempo = resp.json().get("tempo", 0.0) if resp.status_code == 200 else 0.0
+    _tempo_cache["track_id"] = track_id
+    _tempo_cache["tempo"] = tempo
+    return tempo
+
 ACCEPTED_VARIANTS = [
     "pickle", "picle", "pico", "pika", "pica", 
     "pekle", "pikl", "becle", "piclo", "pizzel"
@@ -351,6 +411,86 @@ async def chat(request: Request):
         reply_text = "Desculpa, tive um problema a ligar ao Gemini."
 
     return {"message": {"content": reply_text}}
+
+@app.get("/spotify/login")
+async def spotify_login():
+    from urllib.parse import urlencode
+    params = {
+        "client_id": SPOTIFY_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": SPOTIFY_REDIRECT_URI,
+        "scope": SPOTIFY_SCOPES,
+    }
+    return RedirectResponse("https://accounts.spotify.com/authorize?" + urlencode(params))
+
+@app.get("/callback")
+async def spotify_callback(code: str = None, error: str = None):
+    if error:
+        return HTMLResponse(f"<h3>Erro na autorização do Spotify: {error}</h3>")
+    if not code:
+        return HTMLResponse("<h3>Pedido inválido (sem código).</h3>")
+
+    auth_header = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
+    resp = requests.post(
+        "https://accounts.spotify.com/api/token",
+        headers={"Authorization": f"Basic {auth_header}", "Content-Type": "application/x-www-form-urlencoded"},
+        data={"grant_type": "authorization_code", "code": code, "redirect_uri": SPOTIFY_REDIRECT_URI},
+    )
+    if resp.status_code != 200:
+        return HTMLResponse(f"<h3>Falha ao trocar o código por token: {resp.text}</h3>")
+
+    data = resp.json()
+    spotify_tokens["access_token"]  = data["access_token"]
+    spotify_tokens["refresh_token"] = data["refresh_token"]
+    spotify_tokens["expires_at"]    = time.time() + data["expires_in"] - 30
+    save_spotify_tokens(spotify_tokens)
+
+    return HTMLResponse("<h3>Spotify autorizado! Já podes fechar esta janela.</h3>")
+
+@app.get("/spotify/now-playing", dependencies=[Depends(verify_secret)])
+async def spotify_now_playing():
+    access_token = get_spotify_access_token()
+    if not access_token:
+        return {"playing": False}
+
+    resp = requests.get(
+        "https://api.spotify.com/v1/me/player/currently-playing",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    if resp.status_code != 200:
+        return {"playing": False}
+
+    data = resp.json()
+    item = data.get("item")
+    if not item or not data.get("is_playing"):
+        return {"playing": False}
+
+    track   = item.get("name", "")
+    artists = ", ".join(a.get("name", "") for a in item.get("artists", []))
+    tempo   = get_track_tempo(item.get("id", ""), access_token) if item.get("id") else 0.0
+
+    return {"playing": True, "track": track, "artist": artists, "tempo": round(tempo, 1)}
+
+@app.post("/spotify/play", dependencies=[Depends(verify_secret)])
+async def spotify_play():
+    access_token = get_spotify_access_token()
+    if not access_token: raise HTTPException(status_code=401, detail="Spotify não autorizado")
+    requests.put("https://api.spotify.com/v1/me/player/play", headers={"Authorization": f"Bearer {access_token}"})
+    return {"ok": True}
+
+@app.post("/spotify/pause", dependencies=[Depends(verify_secret)])
+async def spotify_pause():
+    access_token = get_spotify_access_token()
+    if not access_token: raise HTTPException(status_code=401, detail="Spotify não autorizado")
+    requests.put("https://api.spotify.com/v1/me/player/pause", headers={"Authorization": f"Bearer {access_token}"})
+    return {"ok": True}
+
+@app.post("/spotify/next", dependencies=[Depends(verify_secret)])
+async def spotify_next():
+    access_token = get_spotify_access_token()
+    if not access_token: raise HTTPException(status_code=401, detail="Spotify não autorizado")
+    requests.post("https://api.spotify.com/v1/me/player/next", headers={"Authorization": f"Bearer {access_token}"})
+    return {"ok": True}
 
 @app.get("/reminders/due", dependencies=[Depends(verify_secret)])
 async def reminders_due(time: str):
