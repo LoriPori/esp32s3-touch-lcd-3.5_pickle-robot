@@ -501,6 +501,25 @@ async def spotify_next():
     requests.post("https://api.spotify.com/v1/me/player/next", headers={"Authorization": f"Bearer {access_token}"})
     return {"ok": True}
 
+@app.post("/spotify/toggle-play", dependencies=[Depends(verify_secret)])
+async def spotify_toggle_play():
+    access_token = get_spotify_access_token()
+    if not access_token: raise HTTPException(status_code=401, detail="Spotify não autorizado")
+
+    resp = requests.get("https://api.spotify.com/v1/me/player", headers={"Authorization": f"Bearer {access_token}"})
+    is_playing = resp.json().get("is_playing", False) if (resp.status_code == 200 and resp.text) else False
+
+    action = "pause" if is_playing else "play"
+    requests.put(f"https://api.spotify.com/v1/me/player/{action}", headers={"Authorization": f"Bearer {access_token}"})
+    return {"ok": True, "action": action}
+
+@app.post("/spotify/previous", dependencies=[Depends(verify_secret)])
+async def spotify_previous():
+    access_token = get_spotify_access_token()
+    if not access_token: raise HTTPException(status_code=401, detail="Spotify não autorizado")
+    requests.post("https://api.spotify.com/v1/me/player/previous", headers={"Authorization": f"Bearer {access_token}"})
+    return {"ok": True}
+
 @app.get("/reminders/due", dependencies=[Depends(verify_secret)])
 async def reminders_due(time: str):
     due = [r for r in reminders if not r["delivered"] and r["time"] == time]
