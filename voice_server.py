@@ -5,6 +5,7 @@ import json
 import uuid
 import tempfile
 import subprocess
+import asyncio
 from difflib import SequenceMatcher
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -320,17 +321,23 @@ async def tts(req: TtsRequest):
 
     try:
         communicate = edge_tts.Communicate(clean_text, "pt-PT-DuarteNeural", rate="+5%")
-        await communicate.save(tmp_mp3)
+        await asyncio.wait_for(communicate.save(tmp_mp3), timeout=10)
 
-        subprocess.run([
-            "ffmpeg", "-y", "-i", tmp_mp3, 
-            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", tmp_wav
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # subprocess.run é bloqueante -- corre numa thread separada para não
+        # congelar o event loop (e, com ele, /chat, /stt, /spotify/*, etc.)
+        await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-y", "-i", tmp_mp3, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", tmp_wav],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+        )
 
         with open(tmp_wav, "rb") as f:
             wav_data = f.read()
 
         return Response(content=wav_data, media_type="audio/wav")
+    except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+        print("[Edge-TTS ERRO]: timeout a gerar áudio (TTS lento demais, abortado)")
+        return Response(content=b"", media_type="audio/wav", status_code=504)
     except Exception as e:
         print(f"[Edge-TTS ERRO]: {e}")
         return Response(content=b"", media_type="audio/wav", status_code=500)
