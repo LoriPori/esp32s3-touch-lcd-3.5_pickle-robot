@@ -6,6 +6,7 @@ import uuid
 import tempfile
 import subprocess
 import asyncio
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -31,6 +32,9 @@ app = FastAPI()
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 PICKLE_SHARED_SECRET = os.environ.get("PICKLE_SHARED_SECRET", "")
+WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")
+WEATHER_LAT = 38.7223
+WEATHER_LON = -9.1393
 
 def verify_secret(x_pickle_secret: str = Header(default="")):
     if not PICKLE_SHARED_SECRET or x_pickle_secret != PICKLE_SHARED_SECRET:
@@ -345,6 +349,85 @@ async def tts(req: TtsRequest):
         if os.path.exists(tmp_mp3): os.remove(tmp_mp3)
         if os.path.exists(tmp_wav): os.remove(tmp_wav)
 
+# ==========================================
+# Meteorologia (OpenWeather)
+# ==========================================
+def _detect_weather_query(text: str):
+    """Devolve 'tomorrow', 'today' ou None consoante o pedido de meteorologia."""
+    lower = text.lower()
+    is_weather_query = any(kw in lower for kw in [
+        "previsão", "previsao", "meteorologia", "meteorológico", "meteorologico",
+        "que tempo faz", "como está o tempo", "como esta o tempo", "vai chover",
+        "vai estar sol", "faz frio", "faz calor",
+    ])
+    if not is_weather_query:
+        return None
+    if "amanhã" in lower or "amanha" in lower:
+        return "tomorrow"
+    return "today"
+
+def get_current_weather() -> str:
+    if not WEATHER_API_KEY:
+        return "Não tenho acesso à API do tempo neste momento."
+    try:
+        resp = requests.get(
+            "https://api.openweathermap.org/data/2.5/weather",
+            params={
+                "lat": WEATHER_LAT, "lon": WEATHER_LON,
+                "appid": WEATHER_API_KEY, "units": "metric", "lang": "pt",
+            },
+            timeout=6,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        temp = round(data["main"]["temp"])
+        feels_like = round(data["main"]["feels_like"])
+        description = data["weather"][0]["description"]
+        humidity = data["main"]["humidity"]
+        return (
+            f"Agora em Lisboa estão {temp} graus, com {description}. "
+            f"Sensação térmica de {feels_like} graus e {humidity} por cento de humidade."
+        )
+    except Exception as e:
+        print(f"[Weather ERRO]: {e}")
+        return "Não consegui obter a meteorologia atual, desculpa."
+
+def get_daily_forecast(days_ahead: int = 0) -> str:
+    """days_ahead: 0 = hoje, 1 = amanhã. Agrega o endpoint /forecast (passos de 3h) para o dia alvo."""
+    if not WEATHER_API_KEY:
+        return "Não tenho acesso à API do tempo neste momento."
+    try:
+        resp = requests.get(
+            "https://api.openweathermap.org/data/2.5/forecast",
+            params={
+                "lat": WEATHER_LAT, "lon": WEATHER_LON,
+                "appid": WEATHER_API_KEY, "units": "metric", "lang": "pt",
+            },
+            timeout=6,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        target_date = (datetime.now(ZoneInfo("Europe/Lisbon")) + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        day_entries = [e for e in data.get("list", []) if e["dt_txt"].startswith(target_date)]
+        if not day_entries:
+            return "Ainda não tenho previsão suficiente para esse dia."
+
+        temps = [e["main"]["temp"] for e in day_entries]
+        min_temp = round(min(temps))
+        max_temp = round(max(temps))
+        midday_entry = min(day_entries, key=lambda e: abs(int(e["dt_txt"][11:13]) - 13))
+        description = midday_entry["weather"][0]["description"]
+
+        day_label = "hoje" if days_ahead == 0 else "amanhã"
+        return (
+            f"A previsão para {day_label} em Lisboa aponta para {description}, "
+            f"com temperaturas entre os {min_temp} e os {max_temp} graus."
+        )
+    except Exception as e:
+        print(f"[Weather ERRO]: {e}")
+        return "Não consegui obter a previsão do tempo, desculpa."
+
 @app.post("/chat", dependencies=[Depends(verify_secret)])
 async def chat(request: Request):
     body = await request.json()
@@ -369,6 +452,14 @@ async def chat(request: Request):
         memory_facts.clear()
         save_memory(memory_facts)
         return {"message": {"content": "Pronto, esqueci tudo o que sabia sobre ti."}}
+
+        weather_query = _detect_weather_query(last_user_message)
+    if weather_query == "tomorrow":
+        return {"message": {"content": get_daily_forecast(days_ahead=1)}}
+    elif weather_query == "today":
+        if "previsão" in lower_msg or "previsao" in lower_msg:
+            return {"message": {"content": get_daily_forecast(days_ahead=0)}}
+        return {"message": {"content": get_current_weather()}}
 
     requested_model = body.get("model", GEMINI_MODEL)
 
