@@ -6,6 +6,7 @@ import uuid
 import tempfile
 import subprocess
 import asyncio
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from datetime import datetime
@@ -428,6 +429,43 @@ def get_daily_forecast(days_ahead: int = 0) -> str:
         print(f"[Weather ERRO]: {e}")
         return "Não consegui obter a previsão do tempo, desculpa."
 
+# ==========================================
+# Briefing matinal (Meteorologia + Notícias)
+# ==========================================
+NEWS_FEEDS = [
+    ("RTP", "https://www.rtp.pt/noticias/rss"),
+    ("Público", "https://feeds.feedburner.com/PublicoRSS"),
+]
+
+def fetch_news_headlines(per_feed: int = 2) -> list:
+    """Vai buscar as manchetes mais recentes de cada fonte RSS.
+    Cada fonte falha isoladamente -- uma fonte em baixo não deve
+    destruir o briefing inteiro."""
+    headlines = []
+    for source_name, feed_url in NEWS_FEEDS:
+        try:
+            resp = requests.get(feed_url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            items = root.findall("./channel/item")[:per_feed]
+            for item in items:
+                title_el = item.find("title")
+                if title_el is not None and title_el.text:
+                    headlines.append((source_name, title_el.text.strip()))
+        except Exception as e:
+            print(f"[News ERRO] Falhou obter feed de {source_name}: {e}")
+    return headlines
+
+def get_morning_briefing() -> str:
+    weather_line = get_current_weather()
+    headlines = fetch_news_headlines(per_feed=2)
+
+    if not headlines:
+        return f"Bom dia! {weather_line} Não consegui ir buscar as notícias agora, tenta mais tarde."
+
+    news_lines = "; ".join(f"da {source}: {title}" for source, title in headlines)
+    return f"Bom dia! {weather_line} Agora as principais notícias: {news_lines}."
+
 @app.post("/chat", dependencies=[Depends(verify_secret)])
 async def chat(request: Request):
     body = await request.json()
@@ -452,6 +490,10 @@ async def chat(request: Request):
         memory_facts.clear()
         save_memory(memory_facts)
         return {"message": {"content": "Pronto, esqueci tudo o que sabia sobre ti."}}
+
+
+    if re.match(r'^bom\s*dia\b', lower_msg):
+        return {"message": {"content": get_morning_briefing()}}
 
         
     weather_query = _detect_weather_query(last_user_message)
