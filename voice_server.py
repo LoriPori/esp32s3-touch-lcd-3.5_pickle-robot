@@ -463,8 +463,11 @@ def get_morning_briefing() -> str:
     if not headlines:
         return f"Bom dia! {weather_line} Não consegui ir buscar as notícias agora, tenta mais tarde."
 
-    news_lines = "; ".join(f"da {source}: {title}" for source, title in headlines)
-    return f"Bom dia! {weather_line} Agora as principais notícias: {news_lines}."
+    news_parts = [f"Da {source}: {title}." for source, title in headlines]
+    news_block = " ".join(news_parts)
+
+    return f"Bom dia! {weather_line} Agora as principais notícias. {news_block}"
+
 
 @app.post("/chat", dependencies=[Depends(verify_secret)])
 async def chat(request: Request):
