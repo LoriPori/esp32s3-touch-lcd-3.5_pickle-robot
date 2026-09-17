@@ -453,7 +453,8 @@ async def chat(request: Request):
         save_memory(memory_facts)
         return {"message": {"content": "Pronto, esqueci tudo o que sabia sobre ti."}}
 
-        weather_query = _detect_weather_query(last_user_message)
+        
+    weather_query = _detect_weather_query(last_user_message)
     if weather_query == "tomorrow":
         return {"message": {"content": get_daily_forecast(days_ahead=1)}}
     elif weather_query == "today":
